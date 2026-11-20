@@ -1,19 +1,25 @@
 import { HttpStatus, INestApplication } from '@nestjs/common';
+import { InMemoryDisk, STORAGE_MODULE_OPTIONS } from '@nestjs/storage';
 import { Test, TestingModule } from '@nestjs/testing';
 import { AppModule } from '@src/app.module.js';
 import { PrismaService } from '@src/prisma.service.js';
-import fs from 'fs';
+import { VIDEOS_DISK } from '@src/storage.config.js';
 import request from 'supertest';
 
 describe('VideoController (e2e)', () => {
   let module: TestingModule;
   let app: INestApplication;
   let prismaService: PrismaService;
+  // Stands in for MinIO, so the tests don't need it running.
+  const videosDisk = new InMemoryDisk();
 
   beforeAll(async () => {
     module = await Test.createTestingModule({
       imports: [AppModule],
-    }).compile();
+    })
+      .overrideProvider(STORAGE_MODULE_OPTIONS)
+      .useValue({ default: VIDEOS_DISK, disks: { [VIDEOS_DISK]: videosDisk } })
+      .compile();
 
     app = module.createNestApplication();
     await app.init();
@@ -22,18 +28,18 @@ describe('VideoController (e2e)', () => {
   });
 
   beforeEach(async () => {
-    vi
-      .useFakeTimers({ shouldAdvanceTime: true })
-      .setSystemTime(new Date('2023-01-01'));
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date('2023-01-01'));
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     await prismaService.video.deleteMany();
+    videosDisk.clear();
   });
 
   afterAll(async () => {
     await module.close();
-    fs.rmSync('./uploads', { recursive: true, force: true });
   });
 
   describe('/video (POST)', () => {
@@ -63,6 +69,13 @@ describe('VideoController (e2e)', () => {
             sizeInKb: video.sizeInKb,
             duration: video.duration,
           });
+          expect(videosDisk.keys()).toEqual(
+            expect.arrayContaining([
+              response.body.url,
+              response.body.thumbnailUrl,
+            ]),
+          );
+          expect(videosDisk.keys()).toHaveLength(2);
         });
     });
     it('throws an error when the thumbnail is not provided', async () => {
@@ -88,6 +101,9 @@ describe('VideoController (e2e)', () => {
             statusCode: 400,
           });
         });
+
+      // The video that did arrive is removed from storage.
+      expect(videosDisk.keys()).toEqual([]);
     });
     it('does not allow non mp4 files', async () => {
       const video = {
@@ -112,6 +128,39 @@ describe('VideoController (e2e)', () => {
           error: 'Bad Request',
           statusCode: 400,
         });
+    });
+  });
+
+  describe('/stream/:videoId', () => {
+    it('streams a video', async () => {
+      const { body: sampleVideo } = await request(app.getHttpServer())
+        .post('/video')
+        .attach('video', './test/fixtures/sample.mp4')
+        .attach('thumbnail', './test/fixtures/sample.jpg')
+        .field('title', 'Test Video')
+        .field('description', 'This is a test video')
+        .expect(HttpStatus.CREATED);
+
+      const fileSize = 1430145;
+      const range = `bytes=0-${fileSize - 1}`;
+
+      const response = await request(app.getHttpServer())
+        .get(`/stream/${sampleVideo.id}`)
+        .set('Range', range)
+        .expect(HttpStatus.PARTIAL_CONTENT);
+
+      expect(response.headers['content-range']).toBe(
+        `bytes 0-${fileSize - 1}/${fileSize}`,
+      );
+      expect(response.headers['accept-ranges']).toBe('bytes');
+      expect(response.headers['content-length']).toBe(String(fileSize));
+      expect(response.headers['content-type']).toBe('video/mp4');
+    });
+
+    it('returns 404 if the video is not found', async () => {
+      await request(app.getHttpServer())
+        .get('/stream/45705b56-a47f-4869-b736-8f6626c940f8')
+        .expect(HttpStatus.NOT_FOUND);
     });
   });
 });

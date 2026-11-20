@@ -23,6 +23,17 @@ Validation works with Zod, Valibot, ArkType or any other Standard Schema library
 
 Nest's packages are ESM only, and this project is ESM too: relative imports end in `.js`, `__dirname` doesn't exist (use `import.meta.dirname`), and tests run on Vitest, so mocks are `vi.fn()`, not `jest.fn()`.
 
+## File storage: MinIO
+
+Videos and thumbnails are stored in MinIO (S3-compatible), never on the local disk, through `@nestjs/storage` (https://docs.nestjs.com/application/file-storage.md). Don't add the AWS SDK.
+
+- `src/storage.config.ts` defines the `videos` disk, an `S3Disk` configured from the `STORAGE_S3_*` variables in `.env` (see `.env.example`). Inject it with `@InjectDisk(VIDEOS_DISK)`.
+- Uploads stream straight into the bucket through `uploadToDisk()` in the multer interceptor. Types are checked from the file's bytes. JPEG detection is built in, but MP4 isn't, so `detectMp4` handles it. Keys look like `videos/<uuid>.mp4` and `thumbnails/<uuid>.jpg`. `videos.url` and `videos.thumbnail_url` hold these keys, not paths or URLs.
+- Files are stored before the handler runs, so a handler that rejects a request must delete them (`disk.delete(keys)`).
+- Streaming uses `serveFile()`, which answers `Range` with `206 Partial Content`. Don't pipe streams by hand.
+- Local infra: `docker compose up -d` starts Postgres, MinIO (API `localhost:9000`, console `localhost:9001`) and a one-shot `createbuckets` that creates the private bucket. Docker Hub no longer serves MinIO images, so `minio/minio:latest` and `minio/mc:latest` must already be cached locally.
+- Tests don't need MinIO: e2e tests override `STORAGE_MODULE_OPTIONS` with an `InMemoryDisk`, and unit tests provide `getDiskToken(VIDEOS_DISK)`. Fixtures must be real files of their type (`sample.jpg` is a real JPEG), because detection reads the bytes.
+
 ## Production data: NestJS Observe
 
 This app reports its traces, errors, logs and metrics to [NestJS Observe](https://observe.nestjs.com) through `ObserveModule` in `src/app.module.ts`. Its key pair comes from `OBSERVE_APP_KEY` and `OBSERVE_APP_SECRET` in `.env`, which `npx @nestjs/observe link` writes.
