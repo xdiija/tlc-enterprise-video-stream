@@ -20,6 +20,7 @@
     "noImplicitThis": true,
     "noUnusedParameters": true,
     "outDir": "./dist",
+    "rootDir": ".",
     "paths": {
       "@src/*": ["./src/*"],
       "@resource/*": ["./resource/*"]

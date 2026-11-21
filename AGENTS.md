@@ -23,16 +23,33 @@ Validation works with Zod, Valibot, ArkType or any other Standard Schema library
 
 Nest's packages are ESM only, and this project is ESM too: relative imports end in `.js`, `__dirname` doesn't exist (use `import.meta.dirname`), and tests run on Vitest, so mocks are `vi.fn()`, not `jest.fn()`.
 
+## Layout
+
+A light take on clean architecture:
+
+- `src/core/`: business logic, with no HTTP or storage details.
+  - `entity/`: domain entities (`Content` → `Movie` → `Video` + `Thumbnail`), built with `createNew()` (new) or `createFrom()` (loaded).
+  - `service/`: use cases (`ContentManagementService`, `MediaPlayerService`).
+  - `exception/`: domain errors (`DomainException`, `VideoNotFoundException`). Controllers translate them to HTTP errors.
+- `src/http/rest/`: controllers (`controller/`), response DTOs (`dto/response/`), `RestResponseInterceptor` (validates and strips responses against a DTO), and upload rules (`upload/`).
+- `src/persistence/`: infrastructure: `prisma/` (client), `repository/` (map Prisma rows to and from entities; services use these, never Prisma directly) and `storage/` (MinIO).
+- `database/`: `schema.prisma` and `migrations/`. After changing the schema, run `yarn prisma migrate dev --name <change>`.
+- Tests: unit specs sit next to the file they test (`*.spec.ts`), and e2e specs live in `src/__test__/` (`*.e2e-spec.ts`). They share the dev database and run one file at a time. Fixtures are in `test/fixtures/`.
+
+Entities assign their own fields in their constructors, never with `Object.assign(this, data)` in `BaseEntity`. With the ES2023 target, a subclass's declared fields are reset to `undefined` after `super()` returns.
+
+Routes: `POST /content/video` (multipart: `video`, `thumbnail`, `title`, `description`) returns the content (its `id` is the content id). `GET /stream/:videoId` streams a video by the video's own id, a UUID.
+
 ## File storage: MinIO
 
 Videos and thumbnails are stored in MinIO (S3-compatible), never on the local disk, through `@nestjs/storage` (https://docs.nestjs.com/application/file-storage.md). Don't add the AWS SDK.
 
-- `src/storage.config.ts` defines the `videos` disk, an `S3Disk` configured from the `STORAGE_S3_*` variables in `.env` (see `.env.example`). Inject it with `@InjectDisk(VIDEOS_DISK)`.
-- Uploads stream straight into the bucket through `uploadToDisk()` in the multer interceptor. Types are checked from the file's bytes. JPEG detection is built in, but MP4 isn't, so `detectMp4` handles it. Keys look like `videos/<uuid>.mp4` and `thumbnails/<uuid>.jpg`. `videos.url` and `videos.thumbnail_url` hold these keys, not paths or URLs.
-- Files are stored before the handler runs, so a handler that rejects a request must delete them (`disk.delete(keys)`).
-- Streaming uses `serveFile()`, which answers `Range` with `206 Partial Content`. Don't pipe streams by hand.
+- `src/persistence/storage/storage.config.ts` defines the `videos` disk, an `S3Disk` configured from the `STORAGE_S3_*` variables in `.env` (see `.env.example`).
+- `src/persistence/storage/media-storage.service.ts` (`MediaStorageService`) is the only class that touches the disk: `delete(keys)` and `stream(key, req, res)`. `stream` uses `serveFile()`, which answers `Range` with `206 Partial Content`. Don't pipe streams by hand.
+- `src/http/rest/upload/video-upload.options.ts` holds the multer options. Uploads stream straight into the bucket through `uploadToDisk()`. Types are checked from the file's bytes. JPEG detection is built in, but MP4 isn't, so `detectMp4` handles it. Keys look like `videos/<uuid>.mp4` and `thumbnails/<uuid>.jpg`. `Video.url` and `Thumbnail.url` hold these keys, not paths or URLs.
+- Files are stored before the handler runs, so a handler that rejects a request must delete them (`MediaStorageService.delete`).
 - Local infra: `docker compose up -d` starts Postgres, MinIO (API `localhost:9000`, console `localhost:9001`) and a one-shot `createbuckets` that creates the private bucket. Docker Hub no longer serves MinIO images, so `minio/minio:latest` and `minio/mc:latest` must already be cached locally.
-- Tests don't need MinIO: e2e tests override `STORAGE_MODULE_OPTIONS` with an `InMemoryDisk`, and unit tests provide `getDiskToken(VIDEOS_DISK)`. Fixtures must be real files of their type (`sample.jpg` is a real JPEG), because detection reads the bytes.
+- Tests don't need MinIO: e2e tests override `STORAGE_MODULE_OPTIONS` with an `InMemoryDisk` (put files in it with `disk.put()` to stream them), and unit tests mock `MediaStorageService`. Fixtures must be real files of their type (`sample.jpg` is a real JPEG), because detection reads the bytes.
 
 ## Production data: NestJS Observe
 
